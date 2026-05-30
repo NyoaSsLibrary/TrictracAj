@@ -575,7 +575,7 @@ local function doJoin(jobId)
 	end)
 end
 
-local function createLogEntry(brainrotName, valueText, mutation, playerCount, jobId, val)
+local function createLogEntry(brainrotName, valueText, mutation, playerCount, jobId, val, key)
 	local card = Instance.new("Frame")
 	card.Parent = LogScroll
 	card.BackgroundColor3 = C.CARD
@@ -723,7 +723,7 @@ local function createLogEntry(brainrotName, valueText, mutation, playerCount, jo
 		doJoin(jobId)
 	end)
 
-	table.insert(activeCards, {card = card, value = val})
+	table.insert(activeCards, {card = card, value = val, key = key})
 	table.sort(activeCards, function(a, b) return a.value > b.value end)
 	
 	for i, data in ipairs(activeCards) do
@@ -1039,6 +1039,7 @@ task.spawn(function()
 		end
 
 		local newBestJobId = nil
+		local currentKeys = {}
 
 		for _, entry in ipairs(entries) do
 			local name = tostring(entry.brainrot or entry.name or "Unknown")
@@ -1051,17 +1052,41 @@ task.spawn(function()
 			if val < minValue then continue end
 
 			local key = name .. "_" .. jobId
+			currentKeys[key] = true
+			
 			local isNew = not seenKeys[key]
 			
 			if isNew then
 				seenKeys[key] = true
-				createLogEntry(name, genText, mutation, players, jobId, val)
-
-				if val > globalBestValue then
-					globalBestValue = val
-					newBestJobId = jobId
-				end
+				createLogEntry(name, genText, mutation, players, jobId, val, key)
 			end
+		end
+
+		local i = 1
+		while i <= #activeCards do
+			local cData = activeCards[i]
+			if not currentKeys[cData.key] then
+				if cData.card and cData.card.Parent then 
+					cData.card:Destroy() 
+				end
+				seenKeys[cData.key] = nil
+				table.remove(activeCards, i)
+			else
+				i = i + 1
+			end
+		end
+
+		globalBestValue = 0
+		for _, cData in ipairs(activeCards) do
+			if cData.value > globalBestValue then
+				globalBestValue = cData.value
+				newBestJobId = tostring(cData.key):match("_(.+)$")
+			end
+		end
+
+		table.sort(activeCards, function(a, b) return a.value > b.value end)
+		for idx, cData in ipairs(activeCards) do
+			cData.card.LayoutOrder = idx
 		end
 
 		if isStarted and newBestJobId and newBestJobId ~= "" then
