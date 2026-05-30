@@ -25,6 +25,8 @@ local GLOW_ID = "rbxassetid://5028857084"
 
 local minValue = 29000000
 local fetchInterval = 1
+local autoClear = false
+local clearTime = 10
 local isStarted = false
 local seenKeys = {}
 local activeCards = {}
@@ -39,6 +41,8 @@ local function loadConfig()
 		if s and type(data) == "table" then
 			if data.minValue then minValue = data.minValue end
 			if data.fetchInterval then fetchInterval = data.fetchInterval end
+			if data.autoClear ~= nil then autoClear = data.autoClear end
+			if data.clearTime then clearTime = data.clearTime end
 		end
 	end
 end
@@ -46,7 +50,12 @@ end
 local function saveConfig()
 	if writefile then
 		pcall(function()
-			writefile(configName, HttpService:JSONEncode({minValue = minValue, fetchInterval = fetchInterval}))
+			writefile(configName, HttpService:JSONEncode({
+				minValue = minValue, 
+				fetchInterval = fetchInterval,
+				autoClear = autoClear,
+				clearTime = clearTime
+			}))
 		end)
 	end
 end
@@ -815,6 +824,48 @@ IntervalBox.FocusLost:Connect(function()
 	end
 end)
 
+local autoClearCard = makeSettingsCard(48, 3, "Auto Clear Logs")
+local ACBtn = Instance.new("TextButton")
+ACBtn.Parent = autoClearCard
+ACBtn.AnchorPoint = Vector2.new(1, 0.5)
+ACBtn.Position = UDim2.new(1, -18, 0.5, 0)
+ACBtn.Size = UDim2.new(0, 30, 0, 30)
+ACBtn.BackgroundColor3 = autoClear and C.GREEN or Color3.fromRGB(30, 30, 30)
+ACBtn.Text = ""
+Instance.new("UICorner", ACBtn).CornerRadius = UDim.new(0, 8)
+ACBtn.MouseButton1Click:Connect(function()
+	autoClear = not autoClear
+	ACBtn.BackgroundColor3 = autoClear and C.GREEN or Color3.fromRGB(30, 30, 30)
+	saveConfig()
+end)
+
+local clearTimeCard = makeSettingsCard(48, 4, "Clear Time (seconds)")
+local ClearTimeBox = Instance.new("TextBox")
+ClearTimeBox.Parent = clearTimeCard
+ClearTimeBox.AnchorPoint = Vector2.new(1, 0.5)
+ClearTimeBox.Position = UDim2.new(1, -18, 0.5, 0)
+ClearTimeBox.Size = UDim2.new(0, 80, 0, 30)
+ClearTimeBox.BackgroundColor3 = Color3.fromRGB(7, 9, 7)
+ClearTimeBox.Text = tostring(clearTime)
+ClearTimeBox.PlaceholderText = "10"
+ClearTimeBox.TextColor3 = C.GREEN
+ClearTimeBox.PlaceholderColor3 = C.DIM
+ClearTimeBox.Font = Enum.Font.GothamBold
+ClearTimeBox.TextSize = 13
+ClearTimeBox.ClearTextOnFocus = false
+Instance.new("UICorner", ClearTimeBox).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", ClearTimeBox).Color = C.BORDER_DIM
+
+ClearTimeBox.FocusLost:Connect(function()
+	local n = tonumber(ClearTimeBox.Text)
+	if n and n >= 1 then
+		clearTime = math.floor(n)
+		ClearTimeBox.Text = tostring(clearTime)
+		saveConfig()
+	end
+end)
+
+
 local OpenGlow = Instance.new("ImageLabel")
 OpenGlow.Parent = ScreenGui
 OpenGlow.BackgroundTransparency = 1
@@ -841,12 +892,6 @@ OpenBtn.ZIndex = 50
 OpenBtn.AutoButtonColor = false
 OpenBtn.ClipsDescendants = true
 Instance.new("UICorner", OpenBtn).CornerRadius = UDim.new(0, 13)
-
-local OpenStroke = Instance.new("UIStroke")
-OpenStroke.Parent = OpenBtn
-OpenStroke.Color = C.BORDER
-OpenStroke.Thickness = 2
-OpenStroke.Transparency = 0
 
 local OpenLogo = Instance.new("ImageLabel")
 OpenLogo.Parent = OpenBtn
@@ -1021,6 +1066,29 @@ task.spawn(function()
 
 		if isStarted and newBestJobId and newBestJobId ~= "" then
 			doJoin(newBestJobId)
+		end
+	end
+end)
+
+task.spawn(function()
+	local timer = 0
+	while true do
+		task.wait(1)
+		if autoClear then
+			timer = timer + 1
+			if timer >= clearTime then
+				timer = 0
+				for _, data in ipairs(activeCards) do
+					if data.card and data.card.Parent then 
+						data.card:Destroy() 
+					end
+				end
+				activeCards = {}
+				seenKeys = {}
+				globalBestValue = 0
+			end
+		else
+			timer = 0
 		end
 	end
 end)
