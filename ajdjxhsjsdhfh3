@@ -1,0 +1,1026 @@
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local Player = Players.LocalPlayer
+
+local CoreGui = (gethui and gethui()) or game:GetService("CoreGui")
+local GuiName = "TRIC_TRAC_AJ_GUI"
+
+for _, v in pairs(CoreGui:GetChildren()) do
+	if v.Name == GuiName then v:Destroy() end
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = GuiName
+ScreenGui.Parent = CoreGui
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.ResetOnSpawn = false
+
+local FIREBASE_URL = "https://trictracaj-default-rtdb.firebaseio.com/logs.json"
+local BANNER_ID = "rbxassetid://134081949910164"
+local LOGO_ID = "rbxassetid://117633132087425"
+local GLOW_ID = "rbxassetid://5028857084"
+
+local minValue = 29000000
+local fetchInterval = 1
+local isStarted = false
+local seenKeys = {}
+local activeCards = {}
+local globalBestValue = 0
+
+local _LL_imgCache = {}
+local configName = "TricTracAj.json"
+
+local function loadConfig()
+	if isfile and isfile(configName) then
+		local s, data = pcall(function() return HttpService:JSONDecode(readfile(configName)) end)
+		if s and type(data) == "table" then
+			if data.minValue then minValue = data.minValue end
+			if data.fetchInterval then fetchInterval = data.fetchInterval end
+		end
+	end
+end
+
+local function saveConfig()
+	if writefile then
+		pcall(function()
+			writefile(configName, HttpService:JSONEncode({minValue = minValue, fetchInterval = fetchInterval}))
+		end)
+	end
+end
+
+loadConfig()
+
+local function _llRequestFn()
+	return (syn and syn.request) or (http and http.request) or http_request or request
+end
+
+local function _llUrlEncode(s)
+	return (s:gsub("[^%w%-_%.~]", function(c)
+		return string.format("%%%02X", string.byte(c))
+	end))
+end
+
+local function _llFetchFandomImage(displayName)
+	if _LL_imgCache[displayName] ~= nil then
+		return _LL_imgCache[displayName] or nil
+	end
+	local ok, body = pcall(function()
+		local apiUrl = "https://stealabrainrot.fandom.com/api.php"
+			.. "?action=query&prop=pageimages&format=json&pithumbsize=256&titles="
+			.. (displayName:gsub(" ", "_"))
+		local fn = _llRequestFn()
+		if fn then
+			local r = fn({ Url = apiUrl, Method = "GET", Headers = { ["User-Agent"] = "Mozilla/5.0" }, Timeout = 8 })
+			return (r and r.StatusCode == 200) and r.Body or nil
+		end
+		return HttpService:GetAsync(apiUrl)
+	end)
+	if ok and body then
+		local thumb = body:match('"source":"(https://[^"]+)"')
+			or body:match('"url":"(https://static%.wikia%.nocookie%.net[^"]+)"')
+		if thumb then
+			thumb = thumb:gsub("\\/", "/"):gsub("&amp;", "&")
+			_LL_imgCache[displayName] = thumb
+			return thumb
+		end
+	end
+	local requestFn = _llRequestFn()
+	if requestFn then
+		local candidates = {}
+		local clean = displayName:gsub("%[.-%]%s*", ""):gsub("^%s+", ""):gsub("%s+$", "")
+		clean = clean:match("^(.-)%s*%(") or clean
+		local seen = {}
+		local function add(s)
+			if s and s ~= "" and not seen[s] then seen[s] = true; table.insert(candidates, s) end
+		end
+		add((clean:gsub(" ", "_")))
+		add(_llUrlEncode(clean))
+		add((displayName:gsub(" ", "_")))
+		add(_llUrlEncode(displayName))
+		for _, slug in ipairs(candidates) do
+			local pageBody
+			local ok2, res = pcall(function()
+				return requestFn({
+					Url = "https://stealabrainrot.fandom.com/wiki/" .. slug,
+					Method = "GET",
+					Headers = { ["User-Agent"] = "Mozilla/5.0", ["Accept"] = "text/html", ["Cache-Control"] = "no-cache" },
+					Timeout = 10,
+				})
+			end)
+			if ok2 and res and res.StatusCode == 200 and res.Body and res.Body ~= "" then
+				pageBody = res.Body
+			end
+			if pageBody then
+				local og = pageBody:match('property="og:image"%s+content="([^"]+)"')
+					or pageBody:match('content="([^"]+)"%s+property="og:image"')
+				if og and og ~= "" then
+					og = og:gsub("&amp;", "&"):gsub("&quot;", '"')
+					if og:find("^https?://") then
+						_LL_imgCache[displayName] = og
+						return og
+					end
+				end
+				for _, attr in ipairs({ "data%-src", "src" }) do
+					local last
+					for _, ext in ipairs({ "png", "jpg", "jpeg", "webp" }) do
+						local pat = attr .. '="(https://[^"]+%.' .. ext .. '[^"]*)"'
+						for u in pageBody:gmatch(pat) do
+							if u:find("static%.wikia%.nocookie%.net") and not u:find("/scale%-to%-width%-down/%d%d?$") then
+								last = u
+							end
+						end
+					end
+					if last then
+						last = last:gsub("/revision/latest", "")
+						_LL_imgCache[displayName] = last
+						return last
+					end
+				end
+			end
+		end
+	end
+	_LL_imgCache[displayName] = false
+	return nil
+end
+
+local function getImageForBrainrot(name)
+	local img = _llFetchFandomImage(name)
+	if img then return img end
+	return "https://www.roblox.com/headshot-thumbnail/image?userId=" .. tostring(Player.UserId) .. "&width=420&height=420&format=png"
+end
+
+local function parseValue(text)
+	if not text then return 0 end
+	local s = tostring(text):gsub("%$", ""):gsub("/s", ""):gsub("%s", "")
+	local num = tonumber(s:match("[%d%.]+")) or 0
+	if s:find("[Bb]") then return num * 1e9
+	elseif s:find("[Mm]") then return num * 1e6
+	elseif s:find("[Kk]") then return num * 1e3
+	else return num end
+end
+
+local function formatValue(num)
+	if num >= 1e9 then return string.format("%.1fB", num / 1e9)
+	elseif num >= 1e6 then return string.format("%.1fM", num / 1e6)
+	elseif num >= 1e3 then return string.format("%.1fK", num / 1e3)
+	else return tostring(num) end
+end
+
+local function playClick() end
+
+local C = {
+	BG = Color3.fromRGB(8, 8, 8),
+	BG2 = Color3.fromRGB(8, 10, 8),
+	PANEL = Color3.fromRGB(16, 18, 16),
+	CARD = Color3.fromRGB(20, 22, 20),
+	CARD2 = Color3.fromRGB(26, 32, 26),
+	BORDER = Color3.fromRGB(38, 255, 94),
+	BORDER_DIM = Color3.fromRGB(30, 70, 40),
+	GREEN = Color3.fromRGB(38, 255, 94),
+	GREEN2 = Color3.fromRGB(22, 190, 74),
+	TEXT = Color3.fromRGB(255, 255, 255),
+	SUB = Color3.fromRGB(175, 190, 175),
+	DIM = Color3.fromRGB(100, 115, 100),
+	RED = Color3.fromRGB(255, 75, 85),
+	YELLOW = Color3.fromRGB(255, 195, 54),
+	BLUE = Color3.fromRGB(70, 160, 255),
+	PURPLE = Color3.fromRGB(170, 80, 255),
+}
+
+local tweenInfo = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local springInfo = TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local dragInfo = TweenInfo.new(0.06, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+local SCALE_VISIBLE = isMobile and 0.6 or 1
+local SCALE_HIDDEN = SCALE_VISIBLE - 0.1
+
+local Frame = Instance.new("CanvasGroup")
+Frame.Name = "MainWindow"
+Frame.Parent = ScreenGui
+Frame.AnchorPoint = Vector2.new(0.5, 0.5)
+Frame.Position = UDim2.new(0.5, 0, 0.5, 0)
+Frame.Size = UDim2.new(0, 560, 0, 480)
+Frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+Frame.BackgroundTransparency = 0
+Frame.BorderSizePixel = 0
+Frame.Active = true
+Frame.GroupTransparency = 1
+Frame.ClipsDescendants = true
+Instance.new("UICorner", Frame).CornerRadius = UDim.new(0, 14)
+
+local UIScale = Instance.new("UIScale")
+UIScale.Parent = Frame
+UIScale.Scale = SCALE_HIDDEN
+
+local FrameStroke = Instance.new("UIStroke")
+FrameStroke.Parent = Frame
+FrameStroke.Color = C.BORDER
+FrameStroke.Thickness = 1.4
+FrameStroke.Transparency = 0
+
+TweenService:Create(Frame, TweenInfo.new(0.35, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), { GroupTransparency = 0 }):Play()
+TweenService:Create(UIScale, springInfo, { Scale = SCALE_VISIBLE }):Play()
+
+local Banner = Instance.new("ImageLabel")
+Banner.Name = "Banner"
+Banner.Parent = Frame
+Banner.BackgroundColor3 = C.BG
+Banner.BorderSizePixel = 0
+Banner.Position = UDim2.new(0, 0, 0, 0)
+Banner.Size = UDim2.new(1, 0, 0, 130)
+Banner.Image = BANNER_ID
+Banner.ScaleType = Enum.ScaleType.Crop
+Banner.ClipsDescendants = true
+
+local BannerShade = Instance.new("Frame")
+BannerShade.Parent = Banner
+BannerShade.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+BannerShade.BackgroundTransparency = 1
+BannerShade.BorderSizePixel = 0
+BannerShade.Size = UDim2.new(1, 0, 1, 0)
+
+local BannerLine = Instance.new("Frame")
+BannerLine.Parent = Frame
+BannerLine.BorderSizePixel = 0
+BannerLine.BackgroundColor3 = C.BORDER
+BannerLine.BackgroundTransparency = 0.18
+BannerLine.Position = UDim2.new(0, 0, 0, 130)
+BannerLine.Size = UDim2.new(1, 0, 0, 1)
+
+local BannerLineGrad = Instance.new("UIGradient")
+BannerLineGrad.Parent = BannerLine
+BannerLineGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 0, 0)),
+	ColorSequenceKeypoint.new(0.5, C.BORDER),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 0, 0)),
+})
+
+local Controls = Instance.new("Frame")
+Controls.Parent = Frame
+Controls.BackgroundTransparency = 1
+Controls.Position = UDim2.new(1, -84, 0, 10)
+Controls.Size = UDim2.new(0, 68, 0, 30)
+Controls.ZIndex = 20
+
+local ControlLayout = Instance.new("UIListLayout")
+ControlLayout.Parent = Controls
+ControlLayout.FillDirection = Enum.FillDirection.Horizontal
+ControlLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+ControlLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+ControlLayout.Padding = UDim.new(0, 8)
+
+local function makeTopButton(txt)
+	local btn = Instance.new("TextButton")
+	btn.BackgroundColor3 = Color3.fromRGB(16, 18, 16)
+	btn.BackgroundTransparency = 0.05
+	btn.Size = UDim2.new(0, 28, 0, 26)
+	btn.Text = txt
+	btn.TextColor3 = C.TEXT
+	btn.Font = Enum.Font.GothamBlack
+	btn.TextSize = 14
+	btn.AutoButtonColor = false
+	btn.ZIndex = 21
+	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 9)
+	local s = Instance.new("UIStroke")
+	s.Parent = btn
+	s.Color = C.BORDER_DIM
+	s.Thickness = 1
+	s.Transparency = 0.2
+	btn.MouseEnter:Connect(function()
+		TweenService:Create(btn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(22, 34, 22) }):Play()
+		TweenService:Create(s, tweenInfo, { Color = C.BORDER, Transparency = 0.05 }):Play()
+	end)
+	btn.MouseLeave:Connect(function()
+		TweenService:Create(btn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(16, 18, 16) }):Play()
+		TweenService:Create(s, tweenInfo, { Color = C.BORDER_DIM, Transparency = 0.2 }):Play()
+	end)
+	return btn
+end
+
+local MinBtn = makeTopButton("−")
+MinBtn.Parent = Controls
+
+local CloseBtn = makeTopButton("×")
+CloseBtn.Parent = Controls
+
+local NavBar = Instance.new("Frame")
+NavBar.Parent = Frame
+NavBar.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+NavBar.BackgroundTransparency = 0
+NavBar.BorderSizePixel = 0
+NavBar.Position = UDim2.new(0, 0, 0, 131)
+NavBar.Size = UDim2.new(1, 0, 0, 52)
+
+local NavLine = Instance.new("Frame")
+NavLine.Parent = NavBar
+NavLine.BorderSizePixel = 0
+NavLine.BackgroundColor3 = C.BORDER_DIM
+NavLine.BackgroundTransparency = 0.35
+NavLine.Position = UDim2.new(0, 0, 1, -1)
+NavLine.Size = UDim2.new(1, 0, 0, 1)
+
+local TabHolder = Instance.new("Frame")
+TabHolder.Parent = NavBar
+TabHolder.BackgroundTransparency = 1
+TabHolder.Position = UDim2.new(0, 14, 0, 8)
+TabHolder.Size = UDim2.new(0, 300, 0, 36)
+
+local TabLayout = Instance.new("UIListLayout")
+TabLayout.Parent = TabHolder
+TabLayout.FillDirection = Enum.FillDirection.Horizontal
+TabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+TabLayout.Padding = UDim.new(0, 8)
+
+local StartBtn = Instance.new("TextButton")
+StartBtn.Parent = NavBar
+StartBtn.AnchorPoint = Vector2.new(1, 0.5)
+StartBtn.Position = UDim2.new(1, -22, 0.5, 0)
+StartBtn.Size = UDim2.new(0, 110, 0, 36)
+StartBtn.BackgroundColor3 = C.GREEN2
+StartBtn.Text = "▶  START"
+StartBtn.TextColor3 = Color3.fromRGB(4, 20, 8)
+StartBtn.Font = Enum.Font.GothamBlack
+StartBtn.TextSize = 13
+StartBtn.AutoButtonColor = false
+Instance.new("UICorner", StartBtn).CornerRadius = UDim.new(0, 10)
+
+local StartStroke = Instance.new("UIStroke")
+StartStroke.Parent = StartBtn
+StartStroke.Color = C.BORDER
+StartStroke.Thickness = 1.2
+StartStroke.Transparency = 0.1
+
+local StartGlow = Instance.new("ImageLabel")
+StartGlow.Parent = StartBtn
+StartGlow.BackgroundTransparency = 1
+StartGlow.Image = GLOW_ID
+StartGlow.ImageColor3 = C.GREEN
+StartGlow.ImageTransparency = 0.78
+StartGlow.AnchorPoint = Vector2.new(0.5, 0.5)
+StartGlow.Position = UDim2.new(0.5, 0, 0.5, 0)
+StartGlow.Size = UDim2.new(1, 58, 1, 58)
+StartGlow.ZIndex = StartBtn.ZIndex - 1
+
+StartBtn.MouseEnter:Connect(function()
+	TweenService:Create(StartBtn, tweenInfo, { BackgroundColor3 = C.GREEN }):Play()
+	TweenService:Create(StartGlow, tweenInfo, { ImageTransparency = 0.55 }):Play()
+end)
+StartBtn.MouseLeave:Connect(function()
+	TweenService:Create(StartBtn, tweenInfo, { BackgroundColor3 = isStarted and C.RED or C.GREEN2 }):Play()
+	TweenService:Create(StartGlow, tweenInfo, { ImageTransparency = 0.78 }):Play()
+end)
+StartBtn.MouseButton1Click:Connect(function()
+	playClick()
+	isStarted = not isStarted
+	if isStarted then
+		StartBtn.Text = "■  STOP"
+		StartBtn.TextColor3 = Color3.fromRGB(255, 245, 245)
+		TweenService:Create(StartBtn, tweenInfo, { BackgroundColor3 = C.RED }):Play()
+	else
+		StartBtn.Text = "▶  START"
+		StartBtn.TextColor3 = Color3.fromRGB(4, 20, 8)
+		TweenService:Create(StartBtn, tweenInfo, { BackgroundColor3 = C.GREEN2 }):Play()
+	end
+end)
+
+local Content = Instance.new("Frame")
+Content.Parent = Frame
+Content.BackgroundTransparency = 1
+Content.Position = UDim2.new(0, 14, 0, 207)
+Content.Size = UDim2.new(1, -28, 1, -220)
+
+local LogsPage = Instance.new("Frame")
+LogsPage.Name = "LogsPage"
+LogsPage.Parent = Content
+LogsPage.BackgroundTransparency = 1
+LogsPage.Size = UDim2.new(1, 0, 1, 0)
+
+local SettingsPage = Instance.new("ScrollingFrame")
+SettingsPage.Name = "SettingsPage"
+SettingsPage.Parent = Content
+SettingsPage.BackgroundTransparency = 1
+SettingsPage.BorderSizePixel = 0
+SettingsPage.ScrollBarThickness = 3
+SettingsPage.ScrollBarImageColor3 = C.GREEN
+SettingsPage.Size = UDim2.new(1, 0, 1, 0)
+SettingsPage.AutomaticCanvasSize = Enum.AutomaticSize.Y
+SettingsPage.CanvasSize = UDim2.new(0, 0, 0, 0)
+SettingsPage.Visible = false
+
+local Pages = { Logs = LogsPage, Settings = SettingsPage }
+
+local function showPage(name)
+	for k, p in pairs(Pages) do p.Visible = (k == name) end
+end
+
+local tabs = {}
+
+local function createTab(icon, text, pageName, default)
+	local btn = Instance.new("TextButton")
+	btn.Parent = TabHolder
+	btn.Size = UDim2.new(0, 96, 0, 36)
+	btn.BackgroundColor3 = default and Color3.fromRGB(18, 70, 34) or Color3.fromRGB(18, 20, 18)
+	btn.BackgroundTransparency = default and 0 or 0.12
+	btn.Text = icon .. "  " .. text
+	btn.TextColor3 = default and C.TEXT or C.SUB
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 12
+	btn.AutoButtonColor = false
+	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Parent = btn
+	stroke.Color = default and C.BORDER or C.BORDER_DIM
+	stroke.Thickness = 1
+	stroke.Transparency = default and 0.05 or 0.35
+
+	local underline = Instance.new("Frame")
+	underline.Parent = btn
+	underline.AnchorPoint = Vector2.new(0.5, 1)
+	underline.Position = UDim2.new(0.5, 0, 1, 0)
+	underline.Size = default and UDim2.new(0.75, 0, 0, 2) or UDim2.new(0, 0, 0, 2)
+	underline.BackgroundColor3 = C.GREEN
+	underline.BorderSizePixel = 0
+	Instance.new("UICorner", underline).CornerRadius = UDim.new(0, 2)
+
+	local data = { Button = btn, Stroke = stroke, Underline = underline, Page = pageName, Active = default }
+	table.insert(tabs, data)
+
+	btn.MouseEnter:Connect(function()
+		if not data.Active then
+			TweenService:Create(btn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(16, 24, 16), TextColor3 = C.TEXT }):Play()
+			TweenService:Create(stroke, tweenInfo, { Color = C.BORDER, Transparency = 0.12 }):Play()
+		end
+	end)
+	btn.MouseLeave:Connect(function()
+		if not data.Active then
+			TweenService:Create(btn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(18, 20, 18), TextColor3 = C.SUB }):Play()
+			TweenService:Create(stroke, tweenInfo, { Color = C.BORDER_DIM, Transparency = 0.35 }):Play()
+		end
+	end)
+	btn.MouseButton1Click:Connect(function()
+		playClick()
+		showPage(pageName)
+		for _, t in ipairs(tabs) do
+			t.Active = false
+			TweenService:Create(t.Button, tweenInfo, { BackgroundColor3 = Color3.fromRGB(18, 20, 18), TextColor3 = C.SUB }):Play()
+			TweenService:Create(t.Stroke, tweenInfo, { Color = C.BORDER_DIM, Transparency = 0.35 }):Play()
+			TweenService:Create(t.Underline, tweenInfo, { Size = UDim2.new(0, 0, 0, 2) }):Play()
+		end
+		data.Active = true
+		TweenService:Create(btn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(18, 70, 34), TextColor3 = C.TEXT }):Play()
+		TweenService:Create(stroke, tweenInfo, { Color = C.BORDER, Transparency = 0.05 }):Play()
+		TweenService:Create(underline, tweenInfo, { Size = UDim2.new(0.75, 0, 0, 2) }):Play()
+	end)
+end
+
+createTab("▣", "Logs", "Logs", true)
+createTab("⚙", "Settings", "Settings", false)
+
+local LogsPanel = Instance.new("Frame")
+LogsPanel.Parent = LogsPage
+LogsPanel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+LogsPanel.BackgroundTransparency = 0
+LogsPanel.Size = UDim2.new(1, 0, 1, 0)
+LogsPanel.BorderSizePixel = 0
+Instance.new("UICorner", LogsPanel).CornerRadius = UDim.new(0, 12)
+
+local LogsStroke = Instance.new("UIStroke")
+LogsStroke.Parent = LogsPanel
+LogsStroke.Color = C.BORDER_DIM
+LogsStroke.Thickness = 1
+LogsStroke.Transparency = 0.05
+
+local LogsTitle = Instance.new("TextLabel")
+LogsTitle.Parent = LogsPanel
+LogsTitle.BackgroundTransparency = 1
+LogsTitle.Position = UDim2.new(0, 14, 0, 8)
+LogsTitle.Size = UDim2.new(1, -28, 0, 22)
+LogsTitle.Font = Enum.Font.GothamBlack
+LogsTitle.Text = "🟢 LIVE"
+LogsTitle.TextColor3 = C.GREEN
+LogsTitle.TextSize = 13
+LogsTitle.TextXAlignment = Enum.TextXAlignment.Left
+task.spawn(function()
+	local dotStates = {"", ".", "..", "..."}
+	local i = 1
+	while true do
+		if LogsTitle and LogsTitle.Parent then
+			LogsTitle.Text = "🟢 LIVE" .. dotStates[i]
+			i = i % #dotStates + 1
+		end
+		task.wait(0.5)
+	end
+end)
+
+
+local LogScroll = Instance.new("ScrollingFrame")
+LogScroll.Parent = LogsPanel
+LogScroll.BackgroundTransparency = 1
+LogScroll.BorderSizePixel = 0
+LogScroll.Position = UDim2.new(0, 10, 0, 36)
+LogScroll.Size = UDim2.new(1, -20, 1, -46)
+LogScroll.ScrollBarThickness = 3
+LogScroll.ScrollBarImageColor3 = C.GREEN
+LogScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+LogScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+LogScroll.ScrollingEnabled = true
+LogScroll.ElasticBehavior = Enum.ElasticBehavior.WhenScrollable
+LogScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+
+local LogLayout = Instance.new("UIListLayout")
+LogLayout.Parent = LogScroll
+LogLayout.SortOrder = Enum.SortOrder.LayoutOrder
+LogLayout.Padding = UDim.new(0, 6)
+
+local LogPadding = Instance.new("UIPadding")
+LogPadding.Parent = LogScroll
+LogPadding.PaddingRight = UDim.new(0, 8)
+
+local function getBadgeColor(mutation)
+	mutation = tostring(mutation or ""):lower()
+	if mutation:find("secret") then return C.RED
+	elseif mutation:find("mythic") then return C.PURPLE
+	elseif mutation:find("legend") then return C.YELLOW
+	elseif mutation:find("rare") then return C.BLUE
+	end
+	return C.GREEN2
+end
+
+local function doJoin(jobId)
+	if not jobId then return end
+	jobId = tostring(jobId):match("^%s*(.-)%s*$")
+	if jobId == "" or jobId == "unknown" then return end
+	local placeId = game.PlaceId
+	pcall(function()
+		if Player.Character and Player.Character:FindFirstChild("HumanoidRootPart") then
+			Player.Character.HumanoidRootPart.Anchored = true
+		end
+	end)
+	pcall(function()
+		TeleportService:TeleportToPlaceInstance(placeId, jobId, Player)
+	end)
+end
+
+local function createLogEntry(brainrotName, valueText, mutation, playerCount, jobId, val)
+	local card = Instance.new("Frame")
+	card.Parent = LogScroll
+	card.BackgroundColor3 = C.CARD
+	card.BackgroundTransparency = 0
+	card.Size = UDim2.new(1, -4, 0, 62)
+	card.ClipsDescendants = false
+	card.BorderSizePixel = 0
+	Instance.new("UICorner", card).CornerRadius = UDim.new(0, 10)
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Parent = card
+	stroke.Color = Color3.fromRGB(38, 48, 38)
+	stroke.Thickness = 1
+	stroke.Transparency = 0.28
+
+	card.MouseEnter:Connect(function()
+		TweenService:Create(card, tweenInfo, { BackgroundColor3 = C.CARD2 }):Play()
+		TweenService:Create(stroke, tweenInfo, { Color = C.BORDER, Transparency = 0.06 }):Play()
+	end)
+	card.MouseLeave:Connect(function()
+		TweenService:Create(card, tweenInfo, { BackgroundColor3 = C.CARD }):Play()
+		TweenService:Create(stroke, tweenInfo, { Color = Color3.fromRGB(38, 48, 38), Transparency = 0.28 }):Play()
+	end)
+
+	local imgBox = Instance.new("Frame")
+	imgBox.Parent = card
+	imgBox.BackgroundColor3 = Color3.fromRGB(8, 12, 8)
+	imgBox.Position = UDim2.new(0, 12, 0.5, -25)
+	imgBox.Size = UDim2.new(0, 50, 0, 50)
+	Instance.new("UICorner", imgBox).CornerRadius = UDim.new(0, 8)
+
+	local imgStroke = Instance.new("UIStroke")
+	imgStroke.Parent = imgBox
+	imgStroke.Color = C.BORDER_DIM
+	imgStroke.Transparency = 0.35
+
+	local img = Instance.new("ImageLabel")
+	img.Parent = imgBox
+	img.BackgroundTransparency = 1
+	img.Position = UDim2.new(0, 4, 0, 4)
+	img.Size = UDim2.new(1, -8, 1, -8)
+	img.Image = LOGO_ID
+	img.ScaleType = Enum.ScaleType.Fit
+
+	task.spawn(function()
+		local imageUrl = getImageForBrainrot(brainrotName)
+		if imageUrl and imageUrl ~= "" then
+			local fn = _llRequestFn()
+			if not fn then return end
+			local ok2, resp = pcall(fn, {
+				Url = imageUrl, Method = "GET",
+				Headers = { ["User-Agent"] = "Mozilla/5.0" }, Timeout = 10
+			})
+			if not ok2 or not resp or resp.StatusCode ~= 200 or not resp.Body or resp.Body == "" then return end
+			local fname = "TricTracScanner/img_" .. tostring(math.random(100000, 999999)) .. ".png"
+			local wok = pcall(writefile, fname, resp.Body)
+			if not wok then return end
+			local assetUrl
+			_, assetUrl = pcall(function() return getcustomasset(fname) end)
+			if assetUrl and assetUrl ~= "" and img and img.Parent then
+				img.Image = assetUrl
+			end
+		end
+	end)
+
+	local nameLabel = Instance.new("TextLabel")
+	nameLabel.Parent = card
+	nameLabel.BackgroundTransparency = 1
+	nameLabel.Position = UDim2.new(0, 72, 0, 8)
+	nameLabel.Size = UDim2.new(0, 190, 0, 18)
+	nameLabel.Font = Enum.Font.GothamBlack
+	nameLabel.Text = tostring(brainrotName or "Unknown")
+	nameLabel.TextColor3 = C.TEXT
+	nameLabel.TextSize = 13
+	nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+	nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+
+	local valLabel = Instance.new("TextLabel")
+	valLabel.Parent = card
+	valLabel.BackgroundTransparency = 1
+	valLabel.Position = UDim2.new(0, 72, 0, 32)
+	valLabel.Size = UDim2.new(0, 90, 0, 16)
+	valLabel.Font = Enum.Font.GothamBlack
+	valLabel.Text = tostring(valueText or "$0/s")
+	valLabel.TextColor3 = C.GREEN
+	valLabel.TextSize = 12
+	valLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+	local badge = Instance.new("TextLabel")
+	badge.Parent = card
+	badge.BackgroundColor3 = getBadgeColor(mutation)
+	badge.BackgroundTransparency = 0.78
+	badge.Position = UDim2.new(0, 166, 0, 32)
+	badge.Size = UDim2.new(0, 82, 0, 16)
+	badge.Font = Enum.Font.GothamBold
+	badge.Text = tostring(mutation or "None")
+	badge.TextColor3 = getBadgeColor(mutation)
+	badge.TextSize = 10
+	Instance.new("UICorner", badge).CornerRadius = UDim.new(0, 6)
+	local badgeStroke = Instance.new("UIStroke")
+	badgeStroke.Parent = badge
+	badgeStroke.Color = getBadgeColor(mutation)
+	badgeStroke.Thickness = 1
+	badgeStroke.Transparency = 0.15
+
+	local playersLabel = Instance.new("TextLabel")
+	playersLabel.Parent = card
+	playersLabel.BackgroundTransparency = 1
+	playersLabel.Position = UDim2.new(1, -100, 0, 8)
+	playersLabel.Size = UDim2.new(0, 88, 0, 16)
+	playersLabel.Font = Enum.Font.GothamBold
+	playersLabel.Text = "👥 " .. tostring(playerCount or "0/0")
+	playersLabel.TextColor3 = Color3.fromRGB(145, 240, 165)
+	playersLabel.TextSize = 11
+	playersLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+	local join = Instance.new("TextButton")
+	join.Parent = card
+	join.AnchorPoint = Vector2.new(1, 0.5)
+	join.Position = UDim2.new(1, -10, 0.5, 0)
+	join.Size = UDim2.new(0, 52, 0, 30)
+	join.BackgroundColor3 = Color3.fromRGB(12, 35, 16)
+	join.Text = "JOIN"
+	join.TextColor3 = C.GREEN
+	join.Font = Enum.Font.GothamBlack
+	join.TextSize = 11
+	join.AutoButtonColor = false
+	join.ZIndex = 10
+	Instance.new("UICorner", join).CornerRadius = UDim.new(0, 8)
+
+	local joinStroke = Instance.new("UIStroke")
+	joinStroke.Parent = join
+	joinStroke.Color = C.BORDER
+	joinStroke.Transparency = 0.05
+	joinStroke.ZIndex = 10
+
+	join.MouseEnter:Connect(function()
+		TweenService:Create(join, tweenInfo, { BackgroundColor3 = C.GREEN2, TextColor3 = Color3.fromRGB(2, 20, 6) }):Play()
+	end)
+	join.MouseLeave:Connect(function()
+		TweenService:Create(join, tweenInfo, { BackgroundColor3 = Color3.fromRGB(12, 35, 16), TextColor3 = C.GREEN }):Play()
+	end)
+	join.MouseButton1Click:Connect(function()
+		playClick()
+		doJoin(jobId)
+	end)
+
+	table.insert(activeCards, {card = card, value = val})
+	table.sort(activeCards, function(a, b) return a.value > b.value end)
+	
+	for i, data in ipairs(activeCards) do
+		data.card.LayoutOrder = i
+	end
+
+	return card
+end
+
+local SettingsLayout = Instance.new("UIListLayout")
+SettingsLayout.Parent = SettingsPage
+SettingsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+SettingsLayout.Padding = UDim.new(0, 10)
+
+local SettingsPadding = Instance.new("UIPadding")
+SettingsPadding.Parent = SettingsPage
+SettingsPadding.PaddingTop = UDim.new(0, 3)
+SettingsPadding.PaddingLeft = UDim.new(0, 3)
+SettingsPadding.PaddingRight = UDim.new(0, 8)
+
+local function makeSettingsCard(height, order, title)
+	local card = Instance.new("Frame")
+	card.Parent = SettingsPage
+	card.BackgroundColor3 = C.CARD
+	card.BackgroundTransparency = 0
+	card.Size = UDim2.new(1, -10, 0, height)
+	card.LayoutOrder = order
+	card.BorderSizePixel = 0
+	Instance.new("UICorner", card).CornerRadius = UDim.new(0, 10)
+	local s = Instance.new("UIStroke")
+	s.Parent = card
+	s.Color = C.BORDER_DIM
+	s.Transparency = 0.28
+	local label = Instance.new("TextLabel")
+	label.Parent = card
+	label.BackgroundTransparency = 1
+	label.Position = UDim2.new(0, 16, 0, 0)
+	label.Size = UDim2.new(0.55, 0, 1, 0)
+	label.Font = Enum.Font.GothamBold
+	label.Text = title
+	label.TextColor3 = C.TEXT
+	label.TextSize = 13
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	return card
+end
+
+local minCard = makeSettingsCard(48, 1, "Minimum Value Filter")
+local MinValueBox = Instance.new("TextBox")
+MinValueBox.Parent = minCard
+MinValueBox.AnchorPoint = Vector2.new(1, 0.5)
+MinValueBox.Position = UDim2.new(1, -18, 0.5, 0)
+MinValueBox.Size = UDim2.new(0, 140, 0, 30)
+MinValueBox.BackgroundColor3 = Color3.fromRGB(7, 9, 7)
+MinValueBox.Text = formatValue(minValue)
+MinValueBox.PlaceholderText = "e.g. 29M"
+MinValueBox.TextColor3 = C.GREEN
+MinValueBox.PlaceholderColor3 = C.DIM
+MinValueBox.Font = Enum.Font.GothamBold
+MinValueBox.TextSize = 13
+MinValueBox.ClearTextOnFocus = false
+Instance.new("UICorner", MinValueBox).CornerRadius = UDim.new(0, 8)
+local minBoxStroke = Instance.new("UIStroke")
+minBoxStroke.Parent = MinValueBox
+minBoxStroke.Color = C.BORDER_DIM
+minBoxStroke.Transparency = 0.2
+
+MinValueBox.FocusLost:Connect(function()
+	local parsed = parseValue(MinValueBox.Text)
+	if parsed > 0 then
+		minValue = parsed
+		saveConfig()
+	end
+end)
+
+local intervalCard = makeSettingsCard(48, 2, "Fetch Interval (seconds)")
+local IntervalBox = Instance.new("TextBox")
+IntervalBox.Parent = intervalCard
+IntervalBox.AnchorPoint = Vector2.new(1, 0.5)
+IntervalBox.Position = UDim2.new(1, -18, 0.5, 0)
+IntervalBox.Size = UDim2.new(0, 80, 0, 30)
+IntervalBox.BackgroundColor3 = Color3.fromRGB(7, 9, 7)
+IntervalBox.Text = tostring(fetchInterval)
+IntervalBox.PlaceholderText = "1"
+IntervalBox.TextColor3 = C.GREEN
+IntervalBox.PlaceholderColor3 = C.DIM
+IntervalBox.Font = Enum.Font.GothamBold
+IntervalBox.TextSize = 13
+IntervalBox.ClearTextOnFocus = false
+Instance.new("UICorner", IntervalBox).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", IntervalBox).Color = C.BORDER_DIM
+
+IntervalBox.FocusLost:Connect(function()
+	local n = tonumber(IntervalBox.Text)
+	if n and n >= 1 then
+		fetchInterval = math.floor(n)
+		IntervalBox.Text = tostring(fetchInterval)
+		saveConfig()
+	end
+end)
+
+local OpenGlow = Instance.new("ImageLabel")
+OpenGlow.Parent = ScreenGui
+OpenGlow.BackgroundTransparency = 1
+OpenGlow.Image = GLOW_ID
+OpenGlow.ImageColor3 = C.GREEN
+OpenGlow.ImageTransparency = 0.7
+OpenGlow.Size = UDim2.new(0, 90, 0, 90)
+OpenGlow.AnchorPoint = Vector2.new(0.5, 0.5)
+OpenGlow.Position = UDim2.new(1, -74, 0, 150)
+OpenGlow.Visible = false
+OpenGlow.ZIndex = 49
+
+local OpenBtn = Instance.new("TextButton")
+OpenBtn.Name = "OpenButton"
+OpenBtn.Parent = ScreenGui
+OpenBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+OpenBtn.Position = UDim2.new(1, -74, 0, 150)
+OpenBtn.Size = UDim2.new(0, 60, 0, 60)
+OpenBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+OpenBtn.BackgroundTransparency = 0
+OpenBtn.Text = ""
+OpenBtn.Visible = false
+OpenBtn.ZIndex = 50
+OpenBtn.AutoButtonColor = false
+OpenBtn.ClipsDescendants = true
+Instance.new("UICorner", OpenBtn).CornerRadius = UDim.new(0, 13)
+
+local OpenStroke = Instance.new("UIStroke")
+OpenStroke.Parent = OpenBtn
+OpenStroke.Color = C.BORDER
+OpenStroke.Thickness = 2
+OpenStroke.Transparency = 0
+
+local OpenLogo = Instance.new("ImageLabel")
+OpenLogo.Parent = OpenBtn
+OpenLogo.BackgroundTransparency = 1
+OpenLogo.AnchorPoint = Vector2.new(0.5, 0.5)
+OpenLogo.Position = UDim2.new(0.5, 0, 0.5, 0)
+OpenLogo.Size = UDim2.new(0.72, 0, 0.72, 0)
+OpenLogo.Image = LOGO_ID
+OpenLogo.ScaleType = Enum.ScaleType.Fit
+OpenLogo.ZIndex = 51
+
+OpenBtn.MouseEnter:Connect(function()
+	TweenService:Create(OpenBtn, tweenInfo, { Size = UDim2.new(0, 66, 0, 66) }):Play()
+	TweenService:Create(OpenGlow, tweenInfo, { ImageTransparency = 0.35 }):Play()
+end)
+OpenBtn.MouseLeave:Connect(function()
+	TweenService:Create(OpenBtn, tweenInfo, { Size = UDim2.new(0, 60, 0, 60) }):Play()
+	TweenService:Create(OpenGlow, tweenInfo, { ImageTransparency = 0.55 }):Play()
+end)
+
+local isMinimized = false
+
+local function minimizeGui()
+	if isMinimized then return end
+	isMinimized = true
+	playClick()
+	local t1 = TweenService:Create(UIScale, TweenInfo.new(0.24, Enum.EasingStyle.Quint, Enum.EasingDirection.In), { Scale = SCALE_HIDDEN })
+	local t2 = TweenService:Create(Frame, TweenInfo.new(0.24, Enum.EasingStyle.Quint, Enum.EasingDirection.In), { GroupTransparency = 1 })
+	t1:Play()
+	t2:Play()
+	t1.Completed:Wait()
+	Frame.Visible = false
+	OpenBtn.Visible = true
+	OpenGlow.Visible = true
+	OpenBtn.Size = UDim2.new(0, 16, 0, 16)
+	TweenService:Create(OpenBtn, springInfo, { Size = UDim2.new(0, 60, 0, 60) }):Play()
+end
+
+local function restoreGui()
+	if not isMinimized then return end
+	isMinimized = false
+	playClick()
+	OpenBtn.Visible = false
+	OpenGlow.Visible = false
+	Frame.Visible = true
+	Frame.GroupTransparency = 1
+	UIScale.Scale = SCALE_HIDDEN
+	TweenService:Create(Frame, TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), { GroupTransparency = 0 }):Play()
+	TweenService:Create(UIScale, springInfo, { Scale = SCALE_VISIBLE }):Play()
+end
+
+MinBtn.MouseButton1Click:Connect(minimizeGui)
+OpenBtn.MouseButton1Click:Connect(restoreGui)
+
+CloseBtn.MouseButton1Click:Connect(function()
+	playClick()
+	local t = TweenService:Create(Frame, TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.In), { GroupTransparency = 1 })
+	TweenService:Create(UIScale, TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.In), { Scale = SCALE_HIDDEN }):Play()
+	t:Play()
+	t.Completed:Wait()
+	ScreenGui:Destroy()
+end)
+
+local dragging = false
+local dragStart = nil
+local startPos = nil
+local dragInput = nil
+
+local function updateDrag(input)
+	if not dragging or not dragStart or not startPos then return end
+	local delta = input.Position - dragStart
+	TweenService:Create(Frame, dragInfo, {
+		Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+	}):Play()
+end
+
+Frame.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragStart = input.Position
+		startPos = Frame.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then dragging = false end
+		end)
+	end
+end)
+
+Frame.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		dragInput = input
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if input == dragInput then updateDrag(input) end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = false
+	end
+end)
+
+showPage("Logs")
+
+local function fetchFirebase()
+	local ok, result = pcall(function()
+		local fn = _llRequestFn()
+		if fn then
+			local r = fn({
+				Url = FIREBASE_URL,
+				Method = "GET",
+				Headers = { ["Accept"] = "application/json" },
+				Timeout = 10,
+			})
+			if r and r.StatusCode == 200 and r.Body then
+				return r.Body
+			end
+			return nil
+		end
+		return HttpService:GetAsync(FIREBASE_URL)
+	end)
+	if not ok or not result then return nil end
+	local ok2, data = pcall(HttpService.JSONDecode, HttpService, result)
+	if not ok2 or type(data) ~= "table" then return nil end
+	return data
+end
+
+task.spawn(function()
+	while true do
+		task.wait(fetchInterval)
+		local data = fetchFirebase()
+		if not data then continue end
+
+		local entries = {}
+
+		if data.brainrot then
+			table.insert(entries, data)
+		else
+			for _, v in pairs(data) do
+				if type(v) == "table" then
+					table.insert(entries, v)
+				end
+			end
+		end
+
+		local newBestJobId = nil
+
+		for _, entry in ipairs(entries) do
+			local name = tostring(entry.brainrot or entry.name or "Unknown")
+			local genText = tostring(entry.generation or entry.gen or "$0/s")
+			local mutation = tostring(entry.mutation or "None")
+			local players = tostring(entry.players or "?/?")
+			local jobId = tostring(entry.jobId or entry.job_id or "")
+			local val = parseValue(genText)
+
+			if val < minValue then continue end
+
+			local key = name .. "_" .. jobId
+			local isNew = not seenKeys[key]
+			
+			if isNew then
+				seenKeys[key] = true
+				createLogEntry(name, genText, mutation, players, jobId, val)
+
+				if val > globalBestValue then
+					globalBestValue = val
+					newBestJobId = jobId
+				end
+			end
+		end
+
+		if isStarted and newBestJobId and newBestJobId ~= "" then
+			doJoin(newBestJobId)
+		end
+	end
+end)
